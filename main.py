@@ -1,23 +1,33 @@
 import os
-import time
 import requests
 from datetime import datetime, timedelta
 import pytz
+import cv2
+import numpy as np
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+import time
 
-# ====== Telegram 配置 ======
+# ===== Telegram 配置 =====
 BOT_TOKEN = "8134230045:AAForY5xzO6D4EioSYNfk1yPtF6-cl50ABI"
 CHAT_ID = "485427847"
 
-# ====== 时区设置（马来西亚） ======
+# ===== 时区（马来西亚） =====
 tz = pytz.timezone('Asia/Kuala_Lumpur')
 
-# ====== 自动创建模板目录 ======
-TEMPLATE_DIR = "templates"
-os.makedirs(f"{TEMPLATE_DIR}/fangshui", exist_ok=True)
-os.makedirs(f"{TEMPLATE_DIR}/medium", exist_ok=True)
-os.makedirs(f"{TEMPLATE_DIR}/shouge", exist_ok=True)
+# ===== 样本图路径 =====
+TEMPLATE_PATHS = {
+    "fangshui": "templates/fangshui/",
+    "medium": "templates/medium/",
+    "shouge": "templates/shouge/"
+}
 
-# ====== Telegram 发送消息 ======
+# ===== 状态缓存文件 =====
+STATUS_FILE = "status_cache.txt"
+
+
+# 发送 Telegram 消息
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": message}
@@ -26,64 +36,133 @@ def send_telegram(message):
     except Exception as e:
         print(f"Telegram发送失败: {e}")
 
-# ====== DG 平台检测逻辑 ======
+
+# 状态管理
+def save_status(status, start_time=None):
+    with open(STATUS_FILE, "w") as f:
+        f.write(f"{status}|{start_time if start_time else ''}")
+
+
+def load_status():
+    if os.path.exists(STATUS_FILE):
+        with open(STATUS_FILE, "r") as f:
+            parts = f.read().split("|")
+            return parts[0], parts[1] if len(parts) > 1 else ''
+    return None, None
+
+
+# 图像匹配
+def match_template(screen, templates):
+    screen_gray = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
+    for tpl in templates:
+        template = cv2.imread(tpl, 0)
+        if template is None:
+            continue
+        res = cv2.matchTemplate(screen_gray, template, cv2.TM_CCOEFF_NORMED)
+        if np.max(res) > 0.75:
+            return True
+    return False
+
+
+# 加载样本图路径
+def load_template_paths(folder):
+    files = []
+    if os.path.exists(folder):
+        for f in os.listdir(folder):
+            if f.lower().endswith((".jpg", ".png", ".jpeg")):
+                files.append(os.path.join(folder, f))
+    return files
+
+
+# DG 平台检测逻辑
 def analyze_dg_platform():
-    """
-    实时分析 DG 平台桌面走势：
-    1. 检测是否有大量长龙、多连。
-    2. 检测是否单跳频繁。
-    3. 使用已上传的 fangshui/shouge/medium 样本图片做图像匹配。
-    返回：
-    - "fangshui"      放水时段
-    - "medium_high"   类似放水（中等胜率中上）
-    - "medium"        胜率中等
-    - "shouge"        收割时段
-    """
-    # TODO: 在这里实现真实网页检测 + 图像比对逻辑
-    # 当前仅作占位符
-    return "fangshui"  # 测试时固定返回放水
+    options = Options()
+    options.add_argument('--headless')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+    driver = webdriver.Chrome(options=options)
 
-# ====== 主循环 ======
-def main():
-    last_status = None
-    fangshui_start_time = None
-    fangshui_end_estimate = None
+    try:
+        driver.get("https://dg18.co/wap/")
+        time.sleep(5)
 
-    print("启动 DG 平台自动检测 (24h, 马来西亚时区 GMT+8)...")
-    while True:
-        current_time = datetime.now(tz)
-        status = analyze_dg_platform()
+        # 模拟点击 “免费试玩” 或 “Free”
+        try:
+            free_btn = driver.find_element(By.PARTIAL_LINK_TEXT, "免费")
+            free_btn.click()
+            time.sleep(5)
+        except:
+            try:
+                free_btn = driver.find_element(By.PARTIAL_LINK_TEXT, "Free")
+                free_btn.click()
+                time.sleep(5)
+            except:
+                pass
 
-        if status == "fangshui":
-            if last_status != "fangshui":
-                fangshui_start_time = current_time
-                fangshui_end_estimate = current_time + timedelta(minutes=30)  # 默认预计放水30分钟
-                send_telegram(
-                    f"🔥 {current_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"检测到【放水时段（提高胜率）】！\n"
-                    f"预计结束时间：{fangshui_end_estimate.strftime('%H:%M')}。"
-                )
-            last_status = "fangshui"
+        # 截图当前页面
+        screenshot_path = "current_screen.png"
+        driver.save_screenshot(screenshot_path)
 
-        elif status == "medium_high":
-            if last_status != "medium_high":
-                send_telegram(
-                    f"⚠ {current_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"检测到【类似放水时段（中等胜率中上）】。\n请留意台桌走势。"
-                )
-            last_status = "medium_high"
+        # 加载截图
+        screen = cv2.imread(screenshot_path)
 
+        # 加载模板
+        fangshui_templates = load_template_paths(TEMPLATE_PATHS["fangshui"])
+        medium_templates = load_template_paths(TEMPLATE_PATHS["medium"])
+        shouge_templates = load_template_paths(TEMPLATE_PATHS["shouge"])
+
+        # 匹配逻辑
+        if match_template(screen, fangshui_templates):
+            return "fangshui"
+        elif match_template(screen, medium_templates):
+            return "medium_high"
+        elif match_template(screen, shouge_templates):
+            return "shouge"
         else:
-            if last_status == "fangshui" and fangshui_start_time:
-                duration = int((current_time - fangshui_start_time).total_seconds() / 60)
-                send_telegram(
-                    f"🔴 {current_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"放水已结束，共持续 {duration} 分钟。"
-                )
-                fangshui_start_time = None
-            last_status = status
+            return "medium"
 
-        time.sleep(60)  # 每分钟检测一次
+    except Exception as e:
+        print(f"DG 检测错误: {e}")
+        return "medium"
+
+    finally:
+        driver.quit()
+
+
+# 主逻辑
+def main():
+    current_time = datetime.now(tz)
+    status, start_time_str = load_status()
+    start_time = datetime.fromisoformat(start_time_str) if start_time_str else None
+
+    new_status = analyze_dg_platform()
+
+    if new_status == "fangshui":
+        if status != "fangshui":
+            start_time = current_time
+            send_telegram(
+                f"🔥 {current_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"检测到【放水时段（提高胜率）】！\n预计持续 20-40 分钟，请留意走势。"
+            )
+        save_status("fangshui", start_time.isoformat())
+
+    elif new_status == "medium_high":
+        if status != "medium_high":
+            send_telegram(
+                f"⚠ {current_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"检测到【类似放水时段（中等胜率中上）】。\n请留意走势。"
+            )
+        save_status("medium_high")
+
+    else:
+        if status == "fangshui" and start_time:
+            duration = int((current_time - start_time).total_seconds() / 60)
+            send_telegram(
+                f"🔴 {current_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"放水已结束，共持续 {duration} 分钟。"
+            )
+        save_status(new_status)
+
 
 if __name__ == "__main__":
     main()
