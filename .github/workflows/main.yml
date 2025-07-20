@@ -18,10 +18,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install requests pytz opencv-python selenium
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser chromium-chromedriver
+        run: pip install selenium requests pytz opencv-python Pillow
 
       - name: Run monitor script
         run: python main.py
